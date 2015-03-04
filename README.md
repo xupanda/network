@@ -1,2 +1,2 @@
-# network
-private network like ospf over gre tunnel
+# Network
+# private network like ospf over gre tunnel
