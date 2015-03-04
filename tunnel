@@ -1,0 +1,162 @@
+#!/bin/bash
+#
+# Tunnel        create/delete POINTOPOINT/GRE tunnel
+#
+# chkconfig: 2345 10 90
+# description: ptp tunnel or gre tunnel
+# Author: Xu Panda
+# Last update: 2015-01-24
+
+# Warning: 
+# This script will exchage ser's router,
+# when start you should check it best,and add monitor
+
+# Define all ip infomation like:
+# *******************************************
+# * info="name lo_pub re_pub lo_pri re_pri" *
+# *******************************************
+# name: tunnel name;
+# lo_pub: local real ip address;
+# re_pub: remote real ip address;
+# lo_pri: local private ip address,if ptp no netmask,if gre netmask should be /30;
+# re_pri: remote private ip address;
+
+DIR=$(cd `dirname $0`;echo $PWD)
+# start as system turn on
+st () {
+        local sc=/etc/init.d/tunnel
+        if [ ! -L $sc ];then
+                file=$(echo $0 | awk -F'/' '{print $NF}')
+                me=$DIR/$file
+                /bin/ln -s $me $sc
+        fi
+}
+
+# create tunnel
+cre_ptp () {
+        /sbin/modprobe ipip 
+        /sbin/ip tunnel add $name mode ipip remote $re_pub local $lo_pub
+        /sbin/ip link set $name up
+        /sbin/ifconfig $name $lo_pri pointopoint $re_pri
+}
+
+cre_gre () {
+        /sbin/modprobe ip_gre
+        /sbin/ip tunnel add $name mode gre remote $re_pub local $lo_pub ttl 64
+        /sbin/ip addr add $lo_pri dev $name
+        /sbin/ip link set $name up
+}
+
+del_tun () {
+        /sbin/ip addr | grep -iw POINTOPOINT | \
+                awk '{print $2}' | \
+                awk -F':' '{print $1}' | \
+                awk -F'@' '{print $1}' | \
+        while read tun;do
+                /sbin/ip tun del $tun
+        done
+}
+
+# renew router
+ren_rou () {
+        /sbin/ip route | grep -w "192.168.0.0/16" | grep -w "$name" > /dev/null
+        if [ $? -ne 0 ];then
+                ip route del 192.168.0.0/16
+                ip route add 192.168.0.0/16 dev "$name"
+        fi
+        /sbin/ip route | grep -w "10.9.0.0/16" | grep -w "$name" > /dev/null
+        if [ $? -ne 0 ];then
+                ip route add 10.9.0.0/16 dev "$name"
+        fi
+        /sbin/ip route | grep -w "172.16.0.0/12" | grep -w "$name" > /dev/null
+        if [ $? -ne 0 ];then
+                ip route del 172.16.0.0/12
+                ip route add 172.16.0.0/12 dev "$name"
+        fi
+}
+
+# ip_forword
+ip_forword () {
+        forword=$(cat /proc/sys/net/ipv4/ip_forward)
+        if [ $forword -ne 1 ];then
+                /sbin/sysctl -w net.ipv4.ip_forward=1
+        fi
+}
+
+# nat
+nat () {
+        # Define your public eth.
+        ifconfig | grep "inet addr" | \
+                egrep -v '172\.1[6-9]\.' | egrep -v ':172\.2[0-9]\.' | egrep -v ':172\.3[0-1]\.' | \
+                egrep -v ':10.' | egrep -v ':192.168.' | egrep -v ':127.0.0.1' | \
+                sed -n '1p' \
+                &> /tmp/pub.ip
+        if [ $? -eq 0 ];then
+                pub_ip=$(cat /tmp/pub.ip | awk '{print $2}' | awk -F':' '{print $2}')
+                pub_eth=$(ifconfig | grep -B1 -w $pub_ip | sed -n '1p' | awk '{print $1}')
+                cat /etc/sysconfig/iptables | grep -iw MASQUERADE | grep '172.16.0.0/12' &> /dev/nul
+                if [ $? -ne 0 ];then
+                        iptables -t nat -A POSTROUTING -s 172.16.0.0/12 -o $pub_eth -j MASQUERADE
+                        /etc/init.d/iptables save
+                fi
+        fi
+}
+
+chk_tun () {
+        ifconfig | grep -w $name &> /dev/null
+        if [ $? -eq 0 ];then
+                echo -e "\n\e[31m$name already exits.no create.\e[0m\n"
+                continue
+        fi
+}
+
+doptp () {
+        echo $info | while read name lo_pub re_pub lo_pri re_pri;do
+                chk_tun
+                cre_ptp
+        done
+}
+
+dogre () {
+        echo $info | while read name lo_pub re_pub lo_pri re_pri;do
+                chk_tun
+                cre_gre
+        done
+}
+
+cre () {
+info="g1 1.1.1.1 2.2.2.2 172.31.1.1/30 172.31.1.2/30"
+dogre
+
+##.
+info="p1 1.1.1.1 2.2.2.2 172.16.1.253 172.16.1.250"
+doptp
+
+##. if aly ser then turn on nat.
+
+nat
+
+##.
+ip_forword
+# As new eth,so should reload snmpd v3.
+/etc/init.d/snmpd restart &> /dev/null
+}
+
+case $1 in
+        start)
+                echo -n "Creating tunnels: ..."
+                cre
+                st && /sbin/chkconfig tunnel on
+                sleep 1 && echo -e "                                    [\e[32mOK\e[0m]"
+                ;;
+        stop)
+                echo -n "Deleting tunnels: ..."
+                del_tun
+                /sbin/chkconfig tunnel off && rm -rf /etc/init.d/tunnel
+                sleep 1 && echo -e "                                    [\e[32mOK\e[0m]"
+                ;;
+        *)
+                echo -e "Useage:$0 {start|stop} \n
+                \e[32mstart\e[0m = \e[32mcreate\e[0m tunnel \n
+                \e[31mstop\e[0m = \e[31mdelete\e[0m tunnel\n"
+esac
